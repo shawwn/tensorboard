@@ -64,7 +64,9 @@ logger = tb_logging.get_logger()
 class TensorBoardUploader(object):
     """Uploads a TensorBoard logdir to TensorBoard.dev."""
 
-    def __init__(self, writer_client, logdir, rate_limiter=None):
+    def __init__(
+        self, writer_client, logdir,
+        rate_limiter=None, name=None, description=None):
         """Constructs a TensorBoardUploader.
 
         Args:
@@ -74,6 +76,8 @@ class TensorBoardUploader(object):
         """
         self._api = writer_client
         self._logdir = logdir
+        self._name = name
+        self._description = description
         self._request_builder = None
         if rate_limiter is None:
             self._rate_limiter = util.RateLimiter(
@@ -98,6 +102,8 @@ class TensorBoardUploader(object):
         """Creates an Experiment for this upload session and returns the ID."""
         logger.info("Creating experiment")
         request = write_service_pb2.CreateExperimentRequest()
+        request.name = self._name
+        request.description = self._description
         response = grpc_util.call_with_retries(
             self._api.CreateExperiment, request
         )

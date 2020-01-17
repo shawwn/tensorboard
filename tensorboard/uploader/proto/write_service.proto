@@ -25,11 +25,11 @@ service TensorBoardWriterService {
   rpc DeleteOwnUser(DeleteOwnUserRequest) returns (DeleteOwnUserResponse) {}
 }
 
-// This is currently empty on purpose.  No information is necessary
-// to request a URL, except. authorization of course, which doesn't
-// come within the proto.
+// TODO(bileschi): document the name and description here
+// DO NOT SUBMIT.
 message CreateExperimentRequest {
-  // This is empty on purpose.
+  string name = 1;
+  string description = 2;
 }
 
 // Carries all information necessary to:

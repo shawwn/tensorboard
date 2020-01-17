@@ -139,6 +139,18 @@ def _define_flags(parser):
         default=None,
         help="Directory containing the logs to process",
     )
+    upload.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="Name of the experiment to be uploaded.",
+    )
+    upload.add_argument(
+        "--description",
+        type=str,
+        default=None,
+        help="Description of the experiment to be uploaded.",
+    )
 
     delete = subparsers.add_parser(
         "delete",
@@ -408,9 +420,11 @@ class _ListIntent(_Intent):
             experiment_id = experiment.experiment_id
             url = server_info_lib.experiment_url(server_info, experiment_id)
             print(url)
+            experiment_name = experiment.name or "[NO NAME]"
+            description = experiment.description or "[NO DESCRIPTION]"
             data = [
-                ("Name", experiment.name),
-                ("Description", experiment.description),
+                ("Name", experiment_name),
+                ("Description", description),
                 ("Id", experiment.experiment_id),
                 ("Created", util.format_time(experiment.create_time)),
                 ("Updated", util.format_time(experiment.update_time)),
@@ -445,8 +459,10 @@ class _UploadIntent(_Intent):
         """
     )
 
-    def __init__(self, logdir):
+    def __init__(self, logdir, name, description):
         self.logdir = logdir
+        self.name = name
+        self.description = description
 
     def get_ack_message_body(self):
         return self._MESSAGE_TEMPLATE.format(logdir=self.logdir)
@@ -455,7 +471,9 @@ class _UploadIntent(_Intent):
         api_client = write_service_pb2_grpc.TensorBoardWriterServiceStub(
             channel
         )
-        uploader = uploader_lib.TensorBoardUploader(api_client, self.logdir)
+        uploader = uploader_lib.TensorBoardUploader(
+            api_client, self.logdir, name=self.name,
+            description=self.description)
         experiment_id = uploader.create_experiment()
         url = server_info_lib.experiment_url(server_info, experiment_id)
         print(
@@ -543,7 +561,8 @@ def _get_intent(flags):
         raise base_plugin.FlagsError("Must specify subcommand (try --help).")
     if cmd == _SUBCOMMAND_KEY_UPLOAD:
         if flags.logdir:
-            return _UploadIntent(os.path.expanduser(flags.logdir))
+            return _UploadIntent(os.path.expanduser(
+                flags.logdir), flags.name, flags.description)
         else:
             raise base_plugin.FlagsError(
                 "Must specify directory to upload via `--logdir`."
