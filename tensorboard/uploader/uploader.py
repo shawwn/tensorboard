@@ -23,6 +23,7 @@ import time
 
 import grpc
 import six
+import tqdm
 
 from tensorboard.uploader.proto import write_service_pb2
 from tensorboard.uploader import logdir_loader
@@ -39,7 +40,7 @@ from tensorboard.util import tensor_util
 
 # Minimum length of an upload cycle in seconds; shorter cycles will sleep to
 # use up the rest of the time to avoid sending write RPCs too quickly.
-_MIN_UPLOAD_CYCLE_DURATION_SECS = 5
+_MIN_UPLOAD_CYCLE_DURATION_SECS = 0.5
 
 # Age in seconds of last write after which an event file is considered inactive.
 # TODO(@nfelt): consolidate with TensorBoard --reload_multifile default logic.
@@ -59,6 +60,69 @@ _MAX_VARINT64_LENGTH_BYTES = 10
 _MAX_REQUEST_LENGTH_BYTES = 1024 * 128
 
 logger = tb_logging.get_logger()
+
+# http://stackoverflow.com/questions/1624883/alternative-way-to-split-a-list-into-groups-of-n
+import itertools
+def group(n, iterable, fillvalue=None):
+    "group(3, 'ABCDEFG', 'x') --> ABC DEF Gxx"
+    args = [iter(iterable)] * n
+    return itertools.zip_longest(*args, fillvalue=fillvalue)
+
+def trues(x):
+    return [_ for _ in x if _ is not None]
+
+import sys
+IS_PY2 = sys.version_info < (3, 0)
+
+if IS_PY2:
+    from Queue import Queue
+else:
+    from queue import Queue
+
+from threading import Thread
+
+
+class Worker(Thread):
+    """ Thread executing tasks from a given tasks queue """
+    def __init__(self, tasks):
+        Thread.__init__(self)
+        self.tasks = tasks
+        self.daemon = True
+        self.start()
+
+    def run(self):
+        while True:
+            func, args, kargs = self.tasks.get()
+            try:
+                func(*args, **kargs)
+            except Exception as e:
+                # An exception happened in this thread
+                print(e)
+            finally:
+                # Mark this task as done, whether an exception happened or not
+                self.tasks.task_done()
+
+
+class ThreadPool:
+    """ Pool of threads consuming tasks from a queue """
+    def __init__(self, num_threads):
+        self.tasks = Queue(num_threads)
+        for _ in range(num_threads):
+            Worker(self.tasks)
+
+    def add_task(self, func, *args, **kargs):
+        """ Add a task to the queue """
+        self.tasks.put((func, args, kargs))
+
+    def map(self, func, args_list):
+        """ Add a list of tasks to the queue """
+        for args in args_list:
+            self.add_task(func, args)
+
+    def wait_completion(self):
+        """ Wait for completion of all the tasks in the queue """
+        self.tasks.join()
+
 
 
 class TensorBoardUploader(object):
@@ -129,23 +193,43 @@ class TensorBoardUploader(object):
         sync_duration_secs = time.time() - sync_start_time
         logger.info("Logdir sync took %.3f seconds", sync_duration_secs)
 
-        run_to_events = self._logdir_loader.get_run_events()
-        first_request = True
-        for request in self._request_builder.build_requests(run_to_events):
-            if not first_request:
-                self._rate_limiter.tick()
-            first_request = False
-            upload_start_time = time.time()
-            request_bytes = request.ByteSize()
-            logger.info("Trying request of %d bytes", request_bytes)
-            self._upload(request)
-            upload_duration_secs = time.time() - upload_start_time
-            logger.info(
-                "Upload for %d runs (%d bytes) took %.3f seconds",
-                len(request.runs),
-                request_bytes,
-                upload_duration_secs,
-            )
+        buildpool = ThreadPool(1)
+        uploadpool = ThreadPool(1)
+
+        def uploading(requests):
+            requests = [_ for _ in requests]
+            with tqdm.tqdm(total=len(requests), miniters=1) as pbar:
+                def task(request):
+                    try:
+                        self._rate_limiter.tick()
+                        upload_start_time = time.time()
+                        request_bytes = request.ByteSize()
+                        logger.info("Trying request of %d bytes", request_bytes)
+                        self._upload(request)
+                        upload_duration_secs = time.time() - upload_start_time
+                        logger.info(
+                            "Upload for %d runs (%d bytes) took %.3f seconds",
+                            len(request.runs),
+                            request_bytes,
+                            upload_duration_secs,
+                        )
+                    finally:
+                        pbar.update(1)
+                uploadpool.map(task, requests)
+
+        run_to_events = [(run_name, events) for run_name, events in six.iteritems(self._logdir_loader.get_run_events())]
+        with tqdm.tqdm(total=len(run_to_events), miniters=1) as pbar:
+            def task(args):
+                try:
+                    args = [(run_name, list(events)) for run_name, events in args]
+                    requests = self._request_builder.build_requests(dict(args))
+                    uploading(requests)
+                finally:
+                    pbar.update(len(args))
+            for x in group(10, run_to_events):
+                buildpool.add_task(task, trues(x))
+        buildpool.wait_completion()
+        uploadpool.wait_completion()
 
     def _upload(self, request):
         try:
